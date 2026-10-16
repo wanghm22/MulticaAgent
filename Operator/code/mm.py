@@ -84,6 +84,7 @@ def mm_kernel_general(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     IS_FP64: tl.constexpr = False,
+    K_PIPELINE_STAGES: tl.constexpr = 2,
 				 MICRO_M: tl.constexpr = 0,   # ← 新增
     MICRO_K: tl.constexpr = 0,   # ← 新增
     MICRO_N: tl.constexpr = 0, 
@@ -111,7 +112,12 @@ def mm_kernel_general(
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
     else:
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for start_k in range(0, prev_multiple, BLOCK_K):
+    # Keep multiple A/B tiles in flight so their loads can overlap the widening
+    # dot product.  The peeled iteration below remains outside the pipeline and
+    # retains its mask for arbitrary K tails.
+    for start_k in tl.range(
+        0, prev_multiple, BLOCK_K, num_stages=K_PIPELINE_STAGES
+    ):
         rk = (start_k + tl.arange(0, BLOCK_K)).to(tl.int64)
         a = tl.load(A + (ram[:, None] * stride_am + rk[None, :] * stride_ak))
         b = tl.load(B + (rk[:, None] * stride_bk + rbn[None, :] * stride_bn))
@@ -441,6 +447,7 @@ def general_mm(a, b, c, M, N, K):
             c.stride(1),
             GROUP_M=8,
             IS_FP64=a.dtype == torch.float64,
+            K_PIPELINE_STAGES=2,
         )
     return c
 
