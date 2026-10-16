@@ -84,13 +84,19 @@ def mm_kernel_general(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     IS_FP64: tl.constexpr = False,
+    SMALL_M: tl.constexpr = False,
 				 MICRO_M: tl.constexpr = 0,   # ← 新增
     MICRO_K: tl.constexpr = 0,   # ← 新增
     MICRO_N: tl.constexpr = 0, 
 ):
     # matrix multiplication
+    # Autotuned configurations commonly use a tall M tile.  For short matrices
+    # that makes masked accumulator rows consume registers without doing useful
+    # work.  Keep the selected N/K tiles and dot path, but cap the effective M
+    # tile at 16 when the complete M dimension fits in one such tile.
+    TILE_M: tl.constexpr = 16 if SMALL_M else BLOCK_M
     pid = ext.program_id(0)
-    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_m = tl.cdiv(M, TILE_M)
     grid_n = tl.cdiv(N, BLOCK_N)
     # re-order program ID for better L2 performance
     width = GROUP_M * grid_n
@@ -99,18 +105,18 @@ def mm_kernel_general(
     pid_m = group_id * GROUP_M + (pid % group_size)
     pid_n = (pid % width) // (group_size)
     # do matrix multiplication
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rm = pid_m * TILE_M + tl.arange(0, TILE_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M).to(tl.int64)
+    ram = tl.max_contiguous(tl.multiple_of(rm % M, TILE_M), TILE_M).to(tl.int64)
     rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N).to(tl.int64)
     rm = rm.to(tl.int64)
     rn = rn.to(tl.int64)
     prev_multiple = prev_multiple_of(K, BLOCK_K)
 
     if IS_FP64:
-        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
+        acc = tl.zeros((TILE_M, BLOCK_N), dtype=tl.float64)
     else:
-        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc = tl.zeros((TILE_M, BLOCK_N), dtype=tl.float32)
     for start_k in range(0, prev_multiple, BLOCK_K):
         rk = (start_k + tl.arange(0, BLOCK_K)).to(tl.int64)
         a = tl.load(A + (ram[:, None] * stride_am + rk[None, :] * stride_ak))
@@ -146,7 +152,7 @@ def mm_kernel_general(
 
     acc = acc.to(C.dtype.element_ty)
     # rematerialize rm and rn to save registers
-    rm = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+    rm = (pid_m * TILE_M + tl.arange(0, TILE_M)).to(tl.int64)
     rn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     C = C + (rm[:, None] * stride_cm + rn[None, :] * stride_cn)
     mask = (rm < M)[:, None] & (rn < N)[None, :]
@@ -441,6 +447,7 @@ def general_mm(a, b, c, M, N, K):
             c.stride(1),
             GROUP_M=8,
             IS_FP64=a.dtype == torch.float64,
+            SMALL_M=M <= 16,
         )
     return c
 
