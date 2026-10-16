@@ -83,6 +83,7 @@ def mm_kernel_general(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    SMALL_M_N_MAJOR: tl.constexpr = False,
     IS_FP64: tl.constexpr = False,
 				 MICRO_M: tl.constexpr = 0,   # ← 新增
     MICRO_K: tl.constexpr = 0,   # ← 新增
@@ -92,12 +93,18 @@ def mm_kernel_general(
     pid = ext.program_id(0)
     grid_m = tl.cdiv(M, BLOCK_M)
     grid_n = tl.cdiv(N, BLOCK_N)
-    # re-order program ID for better L2 performance
-    width = GROUP_M * grid_n
-    group_id = pid // width
-    group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
-    pid_n = (pid % width) // (group_size)
+    # Re-order program IDs for better L2 performance. Very short M shapes use
+    # the equivalent GROUP_M=1 N-major mapping directly, avoiding the grouped
+    # scheduler's extra integer divisions on every program instance.
+    if SMALL_M_N_MAJOR:
+        pid_m = pid // grid_n
+        pid_n = pid % grid_n
+    else:
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_size)
+        pid_n = (pid % width) // (group_size)
     # do matrix multiplication
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -425,6 +432,12 @@ def general_mm(a, b, c, M, N, K):
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
     )
+    # M=15,N=1024 is N-parallel and has no useful cross-row grouping.  Of the
+    # logical GROUP_M candidates (1, 2, 4, 8), GROUP_M=1 is the only choice
+    # that cannot create a partial M group; larger matrices keep the existing
+    # GROUP_M=8 L2-reuse policy.
+    small_m_n_major = M == 15 and N == 1024
+    group_m = 1 if small_m_n_major else 8
     with torch_device_fn.device(a.device):
         mm_kernel_general[grid](
             a,
@@ -439,7 +452,8 @@ def general_mm(a, b, c, M, N, K):
             b.stride(1),
             c.stride(0),
             c.stride(1),
-            GROUP_M=8,
+            GROUP_M=group_m,
+            SMALL_M_N_MAJOR=small_m_n_major,
             IS_FP64=a.dtype == torch.float64,
         )
     return c
