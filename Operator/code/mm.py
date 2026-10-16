@@ -50,12 +50,6 @@ TLE_REMOTE_A_SLOTS = 2
 logger = logging.getLogger(__name__)
 
 
-@triton.jit
-def prev_multiple_of(a, b):
-    # the largest x<a that x%b ==0
-    return tl.cdiv(a, b) * b - b
-
-
 @libentry()
 @libtuner(
     configs=runtime.get_tuned_config("mm"),
@@ -105,16 +99,21 @@ def mm_kernel_general(
     rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N).to(tl.int64)
     rm = rm.to(tl.int64)
     rn = rn.to(tl.int64)
-    prev_multiple = prev_multiple_of(K, BLOCK_K)
+    # Keep all complete K tiles on a mask-free, fixed-stride path.  In
+    # particular, do not force the final complete tile through the tail path
+    # when K is an exact multiple of BLOCK_K.
+    full_k = (K // BLOCK_K) * BLOCK_K
+    rk = tl.arange(0, BLOCK_K).to(tl.int64)
+    a_ptrs = A + ram[:, None] * stride_am + rk[None, :] * stride_ak
+    b_ptrs = B + rk[:, None] * stride_bk + rbn[None, :] * stride_bn
 
     if IS_FP64:
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
     else:
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for start_k in range(0, prev_multiple, BLOCK_K):
-        rk = (start_k + tl.arange(0, BLOCK_K)).to(tl.int64)
-        a = tl.load(A + (ram[:, None] * stride_am + rk[None, :] * stride_ak))
-        b = tl.load(B + (rk[:, None] * stride_bk + rbn[None, :] * stride_bn))
+    for _ in range(0, full_k, BLOCK_K):
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
         if a.dtype != b.dtype:
             a = a.to(C.dtype.element_ty)
             b = b.to(C.dtype.element_ty)
@@ -122,27 +121,22 @@ def mm_kernel_general(
             acc += tl.dot(a, b, allow_tf32=False)
         else:
             acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
 
-    # loop peeling
-    rk = (prev_multiple + tl.arange(0, BLOCK_K)).to(tl.int64)
-    mask_k = rk < K
-    a = tl.load(
-        A + (ram[:, None] * stride_am + rk[None, :] * stride_ak),
-        mask=mask_k[None, :],
-        other=0.0,
-    )
-    b = tl.load(
-        B + (rk[:, None] * stride_bk + rbn[None, :] * stride_bn),
-        mask=mask_k[:, None],
-        other=0.0,
-    )
-    if a.dtype != b.dtype:
-        a = a.to(C.dtype.element_ty)
-        b = b.to(C.dtype.element_ty)
-    if IS_FP64:
-        acc += tl.dot(a, b, allow_tf32=False)
-    else:
-        acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
+    # A partial tile is the only path that pays for K masking.  a_ptrs and
+    # b_ptrs already point at full_k after the fixed-stride main loop.
+    if full_k < K:
+        mask_k = rk < (K - full_k)
+        a = tl.load(a_ptrs, mask=mask_k[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=mask_k[:, None], other=0.0)
+        if a.dtype != b.dtype:
+            a = a.to(C.dtype.element_ty)
+            b = b.to(C.dtype.element_ty)
+        if IS_FP64:
+            acc += tl.dot(a, b, allow_tf32=False)
+        else:
+            acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
 
     acc = acc.to(C.dtype.element_ty)
     # rematerialize rm and rn to save registers
