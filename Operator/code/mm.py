@@ -84,6 +84,9 @@ def mm_kernel_general(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     IS_FP64: tl.constexpr = False,
+				 MICRO_M: tl.constexpr = 0,   # ← 新增
+    MICRO_K: tl.constexpr = 0,   # ← 新增
+    MICRO_N: tl.constexpr = 0, 
 ):
     # matrix multiplication
     pid = ext.program_id(0)

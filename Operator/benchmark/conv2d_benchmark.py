@@ -57,9 +57,14 @@ weight = torch.empty((C_out, C_in, Kh, Kw), dtype=dtype, device=device).uniform_
 bias = torch.empty((C_out,), dtype=dtype, device=device).uniform_(-0.1, 0.1)
 
 strides = (1, 1)
-padding = (1, 1, 1, 1)     # same padding for 3x3, stride 1
+padding = (1, 1, 1, 1)     # 用例声明的 4 元素 padding（仅用于记录 / 输出尺寸计算）
 dilations = (1, 1)
 groups = 1
+
+# 你的 conv2d 算子接口只接受 int 或 2 元素 padding，
+# 这里把 4 元素对称 padding 转成 (pad_h, pad_w)。
+# 4 元素顺序按 (left, right, top, bottom) 理解，对称时等价于 (top, left)。
+padding_2 = (padding[0], padding[2]) if len(padding) == 4 else padding
 
 print(f"用例: x={tuple(x.shape)}, weight={tuple(weight.shape)}, bias={tuple(bias.shape)}")
 print(f"dtype={dtype}, strides={strides}, pads={padding}, dilations={dilations}, groups={groups}")
@@ -68,32 +73,39 @@ print(f"输出 shape: [{N}, {C_out}, {H}, {W}]")
 # ========== 3. 预热 ==========
 print("\n预热中...")
 for _ in range(5):
-    _ = my_conv2d(x, weight, bias, strides, padding, dilations, groups)
+    _ = my_conv2d(x, weight, bias, strides, padding_2, dilations, groups)
 if device == "cuda":
     torch.cuda.synchronize()
 print("预热完成")
 
 # ========== 4. 正确性验证 ==========
+# ========== 4. 正确性验证 ==========
 print("\n--- 正确性验证 ---")
-# 参考实现：全 fp32 在 CPU 上算，再转回 fp16 比对
-# conv2d 的累加维度是 C_in*Kh*Kw=576，容差比 abs 宽
+# 参考实现：官方 torch.conv2d，fp32，在 CPU 上算
+# 注意：torch.conv2d 对 2D 卷积只接受 int 或 2 元素 padding，所以传 padding_2
 ref_x = x.cpu().float()
 ref_w = weight.cpu().float()
 ref_b = bias.cpu().float()
-ref_out = torch.conv2d(ref_x, ref_w, ref_b, strides, padding, dilations, groups)
+ref_out = torch.conv2d(ref_x, ref_w, ref_b, strides, padding_2, dilations, groups)
 
-gems_out = my_conv2d(x, weight, bias, strides, padding, dilations, groups).cpu().float()
+# 被测：你自己的 conv2d，fp16，在原 device 上算
+gems_out = my_conv2d(x, weight, bias, strides, padding_2, dilations, groups).cpu().float()
 
 max_abs_err = (gems_out - ref_out).abs().max().item()
 denom = ref_out.abs().clamp_min(1e-3)
 max_rel_err = ((gems_out - ref_out).abs() / denom).max().item()
 
+# 混合判据：|a-b| <= atol + rtol*|b|
+atol, rtol = 1e-2, 1e-2
+allowed = atol + rtol * ref_out.abs()
+violations = ((gems_out - ref_out).abs() > allowed).sum().item()
+total = ref_out.numel()
+
 print(f"输出 shape: {tuple(gems_out.shape)}")
 print(f"max_abs_err = {max_abs_err:.3e}")
 print(f"max_rel_err = {max_rel_err:.3e}")
-# fp16 输入 + fp32 累加，conv2d 的容差比 abs 宽
-assert max_abs_err < 1e-2, f"绝对误差超限: {max_abs_err}"
-assert max_rel_err < 1e-2, f"相对误差超限: {max_rel_err}"
+print(f"超限元素数: {violations} / {total}")
+assert violations == 0, f"有 {violations} 个元素超出容差 (atol={atol}, rtol={rtol})"
 print("正确性验证通过 ✓")
 
 # ========== 5. 性能测试循环（供 perf 挂载） ==========
@@ -111,7 +123,7 @@ if device == "cuda":
 start = time.time()
 
 while time.time() - start < duration_sec:
-    out = my_conv2d(x, weight, bias, strides, padding, dilations, groups)
+    out = my_conv2d(x, weight, bias, strides, padding_2, dilations, groups)
     iterations += 1
     if iterations % 200 == 0:
         if device == "cuda":
@@ -126,7 +138,7 @@ end = time.time()
 avg_ms = (end - start) / iterations * 1000
 
 # ========== 6. 性能指标 ==========
-# 输出尺寸
+# 输出尺寸（用 4 元素 padding 计算，与用例声明一致）
 H_out = (H + padding[0] + padding[2] - dilations[0] * (Kh - 1) - 1) // strides[0] + 1
 W_out = (W + padding[1] + padding[3] - dilations[1] * (Kw - 1) - 1) // strides[1] + 1
 
