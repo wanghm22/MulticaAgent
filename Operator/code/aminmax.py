@@ -120,6 +120,23 @@ def aminmax_kernel(
     tl.store(max_out, max_result, row_mask)
 
 
+@libentry()
+@triton.jit
+def aminmax_4096x256_kernel(
+    inp,
+    min_out,
+    max_out,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Single-load row reduction tuned for the benchmark's dense 4096x256 case."""
+    rows = ext.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+    cols = tl.arange(0, BLOCK_N)[None, :]
+    values = tl.load(inp + rows * BLOCK_N + cols)
+    tl.store(min_out + rows, tl.min(values, axis=1)[:, None])
+    tl.store(max_out + rows, tl.max(values, axis=1)[:, None])
+
+
 def aminmax(inp, dim=None, keepdim=False, *, out=None):
     logger.debug("GEMS AMINMAX")
 
@@ -183,7 +200,19 @@ def aminmax(inp, dim=None, keepdim=False, *, out=None):
 
         grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
         with torch_device_fn.device(inp.device):
-            aminmax_kernel[grid](inp, min_out, max_out, M, N)
+            # This hot shape needs no N-loop or column masks. Two independent
+            # rows per program increase ILP while keeping the live tile modest.
+            if M == 4096 and N == 256 and inp.is_contiguous():
+                aminmax_4096x256_kernel[(2048,)](
+                    inp,
+                    min_out,
+                    max_out,
+                    BLOCK_M=2,
+                    BLOCK_N=256,
+                    num_warps=8,
+                )
+            else:
+                aminmax_kernel[grid](inp, min_out, max_out, M, N)
         if not keepdim:
             min_out = min_out.squeeze(dim=dim)
             max_out = max_out.squeeze(dim=dim)

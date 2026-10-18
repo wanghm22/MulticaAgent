@@ -84,9 +84,6 @@ def mm_kernel_general(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     IS_FP64: tl.constexpr = False,
-				 MICRO_M: tl.constexpr = 0,   # ← 新增
-    MICRO_K: tl.constexpr = 0,   # ← 新增
-    MICRO_N: tl.constexpr = 0, 
 ):
     # matrix multiplication
     pid = ext.program_id(0)
@@ -152,6 +149,46 @@ def mm_kernel_general(
     mask = (rm < M)[:, None] & (rn < N)[None, :]
     # handles write-back with reduction-splitting
     tl.store(C, acc, mask=mask)
+
+
+@libentry()
+@triton.jit
+def mm_kernel_narrow_m(
+    A,
+    B,
+    C,
+    M: tl.constexpr,
+    N,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_N: tl.constexpr = 128,
+    BLOCK_K: tl.constexpr = 32,
+):
+    """Low-launch-overhead GEMM for small M and a wide, contiguous N."""
+    pid_n = ext.program_id(0)
+    rm = tl.arange(0, 32)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    acc = tl.zeros((32, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        rk = k0 + tl.arange(0, BLOCK_K)
+        a = tl.load(
+            A + rm[:, None] * stride_am + rk[None, :] * stride_ak,
+            mask=rm[:, None] < M,
+            other=0.0,
+        )
+        b = tl.load(B + rk[:, None] * stride_bk + rn[None, :] * stride_bn)
+        acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
+    out_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+    tl.store(
+        out_ptrs,
+        acc.to(C.dtype.element_ty),
+        mask=(rm[:, None] < M) & (rn[None, :] < N),
+    )
 
 
 if HAS_TLE:
@@ -422,6 +459,36 @@ def get_higher_dtype(a, b):
 
 
 def general_mm(a, b, c, M, N, K):
+    # MM-U1: the common [small M, moderate K, wide N] inference shape is
+    # faster as one fixed 32x128 tile per N block.  Keep the tuned general
+    # kernel as the fallback for layouts/shapes where unmasked K/N loads are
+    # not provably safe.
+    if (
+        M <= 32
+        and K % 32 == 0
+        and N % 128 == 0
+        and a.dtype in (torch.float16, torch.bfloat16)
+        and a.dtype == b.dtype
+        and a.stride(1) == 1
+        and b.stride(1) == 1
+    ):
+        with torch_device_fn.device(a.device):
+            mm_kernel_narrow_m[(N // 128,)](
+                a,
+                b,
+                c,
+                M,
+                N,
+                K,
+                a.stride(0),
+                a.stride(1),
+                b.stride(0),
+                b.stride(1),
+                c.stride(0),
+                c.stride(1),
+                num_warps=8,
+            )
+        return c
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
     )

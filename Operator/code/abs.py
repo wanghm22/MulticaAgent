@@ -28,12 +28,37 @@ def abs_func(x):
     return tl.abs(x)
 
 
+@triton.jit
+def _abs_contiguous_kernel(inp, out, n_elements: tl.constexpr, BLOCK: tl.constexpr):
+    """Branch-free, coalesced fast path for the common dense real tensor case."""
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_elements
+    values = tl.load(inp + offsets, mask=mask)
+    tl.store(out + offsets, tl.abs(values), mask=mask)
+
+
 def abs(A):
     logger.debug("GEMS ABS")
+    # A fixed wide tile exposes more independent loads/stores than the generic
+    # pointwise launcher on K3.  Keep complex and strided tensors on the generic
+    # path so its promotion and indexing rules remain authoritative.
+    if A.is_contiguous() and not A.is_complex() and A.numel() != 0:
+        out = A.new_empty(A.shape)
+        n_elements = A.numel()
+        _abs_contiguous_kernel[(triton.cdiv(n_elements, 1024),)](
+            A, out, n_elements, BLOCK=1024, num_warps=8
+        )
+        return out
     return abs_func(A)
 
 
 def abs_(A):
     logger.debug("GEMS ABS_")
+    if A.is_contiguous() and not A.is_complex() and A.numel() != 0:
+        n_elements = A.numel()
+        _abs_contiguous_kernel[(triton.cdiv(n_elements, 1024),)](
+            A, A, n_elements, BLOCK=1024, num_warps=8
+        )
+        return A
     abs_func(A, out0=A)
     return A

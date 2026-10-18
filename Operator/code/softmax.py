@@ -176,6 +176,25 @@ def softmax_kernel_inner(
             tl.store(output_ptr + n_offsets, o)
 
 
+@libentry()
+@triton.jit
+def softmax_kernel_inner_1024(output_ptr, input_ptr, M, N: tl.constexpr):
+    """SOFTMAX-U1: one persistent CTA per 1024-element row."""
+    row = ext.program_id(0)
+    cols = tl.arange(0, 1024)
+    offsets = row * N + cols
+    # A single load is deliberately retained across both reductions.  This
+    # avoids the second global read used by multi-tile online algorithms.
+    x = tl.load(input_ptr + offsets).to(tl.float32)
+    x = x - tl.max(x, axis=0)
+    numerator = tl.exp(x)
+    denominator = tl.sum(numerator, axis=0)
+    tl.store(
+        output_ptr + offsets,
+        (numerator / denominator).to(output_ptr.dtype.element_ty),
+    )
+
+
 # ------------------------  backward -------------------------------
 @libentry()
 @triton.autotune(
@@ -333,12 +352,21 @@ def softmax_out(self, dim, half_to_float=False, *, out):
             )
         else:
             grid = (M, 1, 1)
-            softmax_kernel_inner[grid](
-                out,
-                self,
-                M,
-                N,
-            )
+            if N == 1024:
+                softmax_kernel_inner_1024[grid](
+                    out,
+                    self,
+                    M,
+                    N,
+                    num_warps=8,
+                )
+            else:
+                softmax_kernel_inner[grid](
+                    out,
+                    self,
+                    M,
+                    N,
+                )
     return out
 
 
