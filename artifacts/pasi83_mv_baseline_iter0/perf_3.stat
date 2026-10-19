@@ -1,0 +1,16 @@
+# started on Mon Oct 19 11:09:07 2026
+
+
+ Performance counter stats for process id '842803':
+
+     <not counted>      cycles                                                                
+     <not counted>      instructions                                                          
+     <not counted>      L1-dcache-loads                                                       
+     <not counted>      L1-dcache-load-misses                                                 
+     <not counted>      L1-dcache-stores                                                      
+   <not supported>      cache-misses                                                          
+     <not counted>      stalled-cycles-frontend                                               
+     <not counted>      stalled-cycles-backend                                                
+
+      55.005527879 seconds time elapsed
+

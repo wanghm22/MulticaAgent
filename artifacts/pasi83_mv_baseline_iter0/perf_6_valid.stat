@@ -1,0 +1,17 @@
+# started on Mon Oct 19 11:14:52 2026
+
+
+ Performance counter stats for process id '846517':
+
+      228839853825      cycles                                                                
+      215294873930      instructions                     #    0.94  insn per cycle            
+                                                  #    0.61  stalled cycles per insn   
+       38895160564      L1-dcache-loads                                                       
+         311048749      L1-dcache-load-misses            #    0.80% of all L1-dcache accesses 
+       15898292867      L1-dcache-stores                                                      
+   <not supported>      cache-misses                                                          
+       45734710705      stalled-cycles-frontend          #   19.99% frontend cycles idle      
+      130471827305      stalled-cycles-backend           #   57.01% backend cycles idle       
+
+      55.006436623 seconds time elapsed
+
