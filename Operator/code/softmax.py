@@ -220,41 +220,60 @@ def softmax_kernel_inner_two_pass(
         offs0 = r0 * N + n_offsets
         offs1 = r1 * N + n_offsets
         if EVEN:
-            # Two independent load chains issued back to back.
-            inp0 = tl.load(input_ptr + offs0).to(tl.float32)
-            inp1 = tl.load(input_ptr + offs1).to(tl.float32)
+            # iter3_p2_fp16_tile_max (seat O1): keep the loaded tile in its
+            # native dtype (fp16) instead of materialising a 4 KB f32 tile for
+            # the max pass.  The row max then reduces the 2-byte tile at 16
+            # lanes (f32 would be 8) and the tile is widened exactly once, at
+            # the exp argument.  fp16->fp32 widening is exact and order
+            # preserving, so max(fp16 tile) == max(widened tile) bit for bit.
+            inp0 = tl.load(input_ptr + offs0)
+            inp1 = tl.load(input_ptr + offs1)
             # Interleaved reduction chains: row0 and row1 max in flight.
-            m0 = tl.max(inp0, 0)
-            m1 = tl.max(inp1, 0)
+            m0 = tl.max(inp0, 0).to(tl.float32)
+            m1 = tl.max(inp1, 0).to(tl.float32)
             m0 = tl.where(m0 == float("-inf"), 0.0, m0)
             m1 = tl.where(m1 == float("-inf"), 0.0, m1)
-            e0 = tl.exp(inp0 - m0)
-            e1 = tl.exp(inp1 - m1)
+            e0 = tl.exp(inp0.to(tl.float32) - m0)
+            e1 = tl.exp(inp1.to(tl.float32) - m1)
             z0 = tl.sum(e0, 0)
             z1 = tl.sum(e1, 0)
-            o0 = e0 / z0
-            o1 = e1 / z1
+            # P2 (iter1_p2_reciprocal): one scalar fp32 reciprocal per row
+            # plus a vector fmul, replacing the 32-lane vector fdiv per chunk.
+            # r0/r1 MUST stay fp32 scalars (never f16 / never approximate).
+            # All-(-inf) rows: z=0 -> r=+inf, e=0 -> 0*inf = NaN, identical to
+            # the baseline's 0/0 = NaN (verified, not assumed).
+            r0 = 1.0 / z0
+            r1 = 1.0 / z1
+            o0 = e0 * r0
+            o1 = e1 * r1
             tl.store(output_ptr + offs0, o0.to(output_ptr.dtype.element_ty))
             tl.store(output_ptr + offs1, o1.to(output_ptr.dtype.element_ty))
         else:
             mask0 = nmask & (r0 < M)
             mask1 = nmask & (r1 < M)
-            inp0 = tl.load(input_ptr + offs0, mask=mask0, other=-float("inf")).to(
-                tl.float32
-            )
-            inp1 = tl.load(input_ptr + offs1, mask=mask1, other=-float("inf")).to(
-                tl.float32
-            )
-            m0 = tl.max(inp0, 0)
-            m1 = tl.max(inp1, 0)
+            # iter3_p2_fp16_tile_max (seat O1): same fp16-tile treatment as
+            # the EVEN path.  other=-inf is representable in fp16, so the
+            # masked tail still reduces to the true row max; the widening is
+            # deferred to the exp argument only.
+            inp0 = tl.load(input_ptr + offs0, mask=mask0, other=-float("inf"))
+            inp1 = tl.load(input_ptr + offs1, mask=mask1, other=-float("inf"))
+            m0 = tl.max(inp0, 0).to(tl.float32)
+            m1 = tl.max(inp1, 0).to(tl.float32)
             m0 = tl.where(m0 == float("-inf"), 0.0, m0)
             m1 = tl.where(m1 == float("-inf"), 0.0, m1)
-            e0 = tl.exp(inp0 - m0)
-            e1 = tl.exp(inp1 - m1)
+            e0 = tl.exp(inp0.to(tl.float32) - m0)
+            e1 = tl.exp(inp1.to(tl.float32) - m1)
             z0 = tl.sum(e0, 0)
             z1 = tl.sum(e1, 0)
-            o0 = e0 / z0
-            o1 = e1 / z1
+            # P2 (iter1_p2_reciprocal): one scalar fp32 reciprocal per row
+            # plus a vector fmul, replacing the 32-lane vector fdiv per chunk.
+            # r0/r1 MUST stay fp32 scalars (never f16 / never approximate).
+            # All-(-inf) rows: z=0 -> r=+inf, e=0 -> 0*inf = NaN, identical to
+            # the baseline's 0/0 = NaN (verified, not assumed).
+            r0 = 1.0 / z0
+            r1 = 1.0 / z1
+            o0 = e0 * r0
+            o1 = e1 * r1
             tl.store(
                 output_ptr + offs0, o0.to(output_ptr.dtype.element_ty), mask=mask0
             )
@@ -442,13 +461,107 @@ def softmax_backward_kernel_inner(
             offsets += TILE_N
 
 
+# =========================================================================
+# iter2 - seat O1 - plan iter2_p2_host_dispatch (host-side dispatch cache)
+# ONLY host code is changed: the kernels, the geometry rule, BLOCK_N/TILE_M
+# values, num_warps, the grid cap (<=256 programs) and every number are the
+# baseline's.  No numeric risk.
+#
+# Why this is worth doing on K3: the official benchmark times the whole Python
+# entry point (my_softmax -> softmax -> softmax_out), so the wrapper body is
+# inside the measured region.  The baseline body decided, on EVERY call,
+# things that only depend on (M, N, dtypes, device): next_power_of_2 + cdiv
+# (~7 us measured), tuple(out.shape)/tuple(self.shape) copies (~2 us),
+# unconditional self.contiguous(), an always-entered device context, the M/N
+# loop, assert and logger.debug.  Measured on RV: module.softmax_out
+# 0.806-0.809 ms vs the same kernel launched directly 0.734-0.739 ms.
+#
+# _LAUNCH_CACHE[(M, N, in_dtype, out_dtype, device)] -> launch geometry, so a
+# repeated call does one dict lookup and one launch.  Key completeness
+# (Analyzer risk #1): the geometry is a pure function of (M, N); dtypes and
+# device are in the key so a dtype/device change can never hit another entry's
+# geometry.  Entries are built completely before being stored (risk #3), so a
+# concurrent reader never sees a half-initialised tuple.
+#
+# Output tensors are NEVER cached or reused (Analyzer H18): empty_like costs
+# only ~6 us and reusing `out` would break softmax()'s aliasing contract.
+#
+# torch_device_fn.device (Analyzer risk #2): on the K3 / spacemit CPU backend
+# the context manager is a literal no-op -- flag_gems/runtime/backend/
+# _spacemit/__init__.py defines _DeviceWrapper.__enter__/__exit__ as `...`
+# (verified on RV).  It is kept on every cold path (K > 1, fallback kernel,
+# cache miss) and skipped only on the cached fast path.
+# =========================================================================
+_LAUNCH_CACHE = {}
+_LAUNCH_CACHE_MAX = 1024
+
+
+def _derive_launch_cfg(M, N):
+    """Baseline geometry, verbatim: (grid0, tile_m, block_n, even, use_fallback).
+
+    Pure function of (M, N); only called on a cache miss.
+    """
+    block_n = max(32, triton.next_power_of_2(N))
+    tile_m = min(16, max(2, triton.next_power_of_2(triton.cdiv(M, 64))))
+    if tile_m % 2 == 1:
+        tile_m += 1
+    grid0 = triton.cdiv(M, tile_m)
+    use_fallback = not (N <= 4096 and grid0 <= 256)
+    even = (block_n == N) and (M % tile_m == 0)
+    return (grid0, tile_m, block_n, even, use_fallback)
+
+
+def _launch_rowbatch(out, inp, M, N):
+    """Baseline fallback launch (N > 4096 or grid0 > 256). Cold path."""
+    with torch_device_fn.device(inp.device):
+        tile_m = 4
+        num_ctas = min(triton.cdiv(M, tile_m), 256)
+        softmax_kernel_inner_rowbatch_stream[(num_ctas, 1, 1)](
+            out,
+            inp,
+            M,
+            N,
+            num_ctas,
+            TILE_N=1024,
+            TILE_M=tile_m,
+            num_warps=4,
+        )
+
+# -------------------------------------------------------------------------
+# candB single-point addition on top of candA: also cache the COMPILED kernel
+# handle, so the fast path calls CompiledKernel directly instead of going
+# through flag_gems' LibEntry.run dispatcher.
+#
+# Measured on RV (1024x1024 fp16, same process): LibEntry dispatch costs
+# ~43 us/call (K[grid](...) 0.734-0.739 ms vs the cached CompiledKernel
+# 0.693 ms for the identical kernel and identical output, err 9.5e-07).
+# That is the dominant part of the ~66-72 us wrapper overhead -- candA alone
+# cannot remove it because the plan's fast path still calls the LibEntry
+# object.  Everything else (geometry, values, kernels) is unchanged.
+#
+# Safety of the cached handle:
+#   * The miss path performs exactly ONE launch, through LibEntry.run(...,
+#     warmup=False), which is literally what kernel[grid](...) does
+#     (triton KernelInterface.__getitem__ == run(grid=..., warmup=False)), and
+#     it returns (CompiledKernel, constexprs).  If it does not return a usable
+#     handle we fall back to the plain launch and cache kernel=None, which
+#     degrades the fast path to candA behaviour.
+#   * LibEntry keys its kernel cache on (tensor dtype, data_ptr() % 16 == 0,
+#     int arg values, constexprs, num_warps, device).  The cache key below
+#     carries the same information -- M, N, both dtypes, device, plus both
+#     16-byte alignment flags -- so a handle is only ever reused for the very
+#     specialisation it was compiled for.  Int args are M/N (in the key);
+#     constexprs are derived from M/N; num_warps is the constant 4.
+# -------------------------------------------------------------------------
+
 def softmax_out(self, dim, half_to_float=False, *, out):
-    logger.debug("GEMS SOFTMAX_OUT")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("GEMS SOFTMAX_OUT")
 
     assert dim >= -self.ndim and dim < self.ndim, "Invalid dim"
 
     if self.numel() == 0:
-        if tuple(out.shape) != tuple(self.shape):
+        if out.shape != self.shape:
             out.resize_(self.shape)
         zero_(out)
         return out
@@ -458,81 +571,132 @@ def softmax_out(self, dim, half_to_float=False, *, out):
     N = self.shape[dim]
     for i in range(dim):
         M *= self.shape[i]
-    self = self.contiguous()
+
     dtype = torch.float32 if half_to_float else self.dtype
-    if tuple(out.shape) != tuple(self.shape):
+    if out.shape != self.shape:
         out.resize_(self.shape)
     if out.dtype != dtype:
         raise RuntimeError(f"_softmax.out: expected out dtype {dtype}, got {out.dtype}")
     K = self.numel() // M // N
 
-    with torch_device_fn.device(self.device):
-        if K > 1:
-            grid = lambda meta: (M, triton.cdiv(K, meta["TILE_K"]), 1)
-            softmax_kernel_non_inner[grid](
-                out,
-                self,
-                M,
-                N,
-                K,
-            )
-        else:
-            # Dual row-pair two-pass kernel (see softmax_kernel_inner_two_pass).
-            # BLOCK_N covers the whole row in one vector (arange >= 16 always;
-            # clamped to >= 32 because on spine a 16-wide fp32 max/exp/sum
-            # reduction chain silently produces all-NaN — verified on RV);
-            # TILE_M (even) rows per CTA -> grid = ceil(M / TILE_M) = 64 for
-            # the 1024x1024 benchmark.  The K3 spine launcher silently drops
-            # programs when a grid dim exceeds ~512, so every launch is capped
-            # at <= 256 programs; oversized shapes fall back to the streaming
-            # rowbatch kernel, which is correct for any M and N.
-            block_n = max(32, triton.next_power_of_2(N))
-            tile_m = min(16, max(2, triton.next_power_of_2(triton.cdiv(M, 64))))
-            if tile_m % 2 == 1:
-                tile_m += 1
-            grid0 = triton.cdiv(M, tile_m)
-            if N <= 4096 and grid0 <= 256:
-                even = (block_n == N) and (M % tile_m == 0)
-                softmax_kernel_inner_two_pass[(grid0, 1, 1)](
-                    out,
-                    self,
-                    M,
-                    N,
-                    TILE_M=tile_m,
-                    BLOCK_N=block_n,
-                    EVEN=even,
-                    num_warps=4,
-                )
-            else:
-                TILE_M = 4
-                num_ctas = min(triton.cdiv(M, TILE_M), 256)
-                softmax_kernel_inner_rowbatch_stream[(num_ctas, 1, 1)](
-                    out,
-                    self,
-                    M,
-                    N,
-                    num_ctas,
-                    TILE_N=1024,
-                    TILE_M=TILE_M,
-                    num_warps=4,
-                )
+    if not self.is_contiguous():
+        self = self.contiguous()
+
+    if K > 1:
+        grid = lambda meta: (M, triton.cdiv(K, meta["TILE_K"]), 1)
+        with torch_device_fn.device(self.device):
+            softmax_kernel_non_inner[grid](out, self, M, N, K)
+        return out
+
+    # Alignment flags mirror LibEntry's `data_ptr() % 16 == 0` tensor
+    # specialisation, so a cached CompiledKernel is never reused across
+    # specialisations.
+    key = (
+        M,
+        N,
+        self.dtype,
+        out.dtype,
+        self.device,
+        self.data_ptr() % 16 == 0,
+        out.data_ptr() % 16 == 0,
+    )
+    entry = _LAUNCH_CACHE.get(key)
+    if entry is not None:
+        grid0, tile_m, block_n, even, use_fallback, kernel = entry
+        if kernel is not None:
+            # Direct CompiledKernel launch: skips LibEntry.run's per-call
+            # OrderedDict / signature walk / key build / cache probe (~43 us).
+            # Args are the kernel's full parameter list in declaration order
+            # (output_ptr, input_ptr, M, N, TILE_M, BLOCK_N, EVEN), which is
+            # precisely what LibEntry.run passes to kernel[grid].
+            kernel[(grid0, 1, 1)](out, self, M, N, tile_m, block_n, even)
+            return out
+        if use_fallback:
+            _launch_rowbatch(out, self, M, N)
+            return out
+        softmax_kernel_inner_two_pass[(grid0, 1, 1)](
+            out,
+            self,
+            M,
+            N,
+            TILE_M=tile_m,
+            BLOCK_N=block_n,
+            EVEN=even,
+            num_warps=4,
+        )
+        return out
+
+    grid0, tile_m, block_n, even, use_fallback = _derive_launch_cfg(M, N)
+    kernel = None
+    if use_fallback:
+        _launch_rowbatch(out, self, M, N)
+    else:
+        kernel = _launch_two_pass_keep_handle(out, self, M, N, grid0, tile_m, block_n, even)
+    if len(_LAUNCH_CACHE) > _LAUNCH_CACHE_MAX:
+        _LAUNCH_CACHE.clear()
+    _LAUNCH_CACHE[key] = (grid0, tile_m, block_n, even, use_fallback, kernel)
     return out
 
 
 def softmax(self, dim, half_to_float=False):
-    logger.debug("GEMS SOFTMAX")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("GEMS SOFTMAX")
 
     assert dim >= -self.ndim and dim < self.ndim, "Invalid dim"
 
     if self.numel() == 0:
-        out_shape = list(self.shape)
-        out = torch.empty(out_shape, dtype=self.dtype, device=self.device)
+        out = torch.empty(list(self.shape), dtype=self.dtype, device=self.device)
         zero_(out)
         return out
 
     dtype = torch.float32 if half_to_float else self.dtype
     out = torch.empty_like(self, dtype=dtype)
     return softmax_out(self, dim, half_to_float, out=out)
+
+
+def _launch_two_pass_keep_handle(out, inp, M, N, grid0, tile_m, block_n, even):
+    """One launch, same semantics as kernel[grid](...), returns the handle.
+
+    LibEntry.run(*args, grid=..., warmup=False) performs exactly the launch
+    that kernel[grid](*args) performs and additionally returns
+    (CompiledKernel, constexprs).  Any surprise (unexpected return shape or an
+    exception) is caught; in that case the plain launch below guarantees the
+    kernel still runs, and we simply cache kernel=None (candA behaviour).
+    """
+    launched = False
+    kernel = None
+    run = getattr(softmax_kernel_inner_two_pass, "run", None)
+    if run is not None:
+        try:
+            res = run(
+                out,
+                inp,
+                M,
+                N,
+                TILE_M=tile_m,
+                BLOCK_N=block_n,
+                EVEN=even,
+                num_warps=4,
+                grid=(grid0, 1, 1),
+                warmup=False,
+            )
+            launched = True
+            if isinstance(res, tuple) and res and hasattr(res[0], "__getitem__"):
+                kernel = res[0]
+        except Exception:
+            launched = False
+    if not launched:
+        softmax_kernel_inner_two_pass[(grid0, 1, 1)](
+            out,
+            inp,
+            M,
+            N,
+            TILE_M=tile_m,
+            BLOCK_N=block_n,
+            EVEN=even,
+            num_warps=4,
+        )
+    return kernel
 
 
 def softmax_backward_out(grad_output, output, dim, input_dtype, *, grad_input):
