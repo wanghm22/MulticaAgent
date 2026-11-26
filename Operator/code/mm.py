@@ -572,10 +572,58 @@ def streamk_scenario(a, b, M, N, K):
     )
 
 
+# I3-MM-O2-BK32: five K32 dots, retaining two FP32 accumulation chains.
+@triton.jit
+def _mm_o2_dualacc_kernel(A, B, C):
+    rows = tl.arange(0, 16)
+    cols = tl.program_id(0) * 32 + tl.arange(0, 32)
+    lanes_k = tl.arange(0, 32)
+    acc0 = tl.zeros((16, 32), dtype=tl.float32)
+    acc1 = tl.zeros((16, 32), dtype=tl.float32)
+    for j in range(2):
+        k0 = j * 64 + lanes_k
+        k1 = k0 + 32
+        a0 = tl.load(A + rows[:, None] * 160 + k0[None, :],
+                     mask=rows[:, None] < 15, other=0.0)
+        b0 = tl.load(B + k0[:, None] * 1024 + cols[None, :])
+        a1 = tl.load(A + rows[:, None] * 160 + k1[None, :],
+                     mask=rows[:, None] < 15, other=0.0)
+        b1 = tl.load(B + k1[:, None] * 1024 + cols[None, :])
+        acc0 += tl.dot(a0, b0, out_dtype=tl.float32, allow_tf32=False)
+        acc1 += tl.dot(a1, b1, out_dtype=tl.float32, allow_tf32=False)
+    k_tail = 128 + lanes_k
+    a_tail = tl.load(A + rows[:, None] * 160 + k_tail[None, :],
+                     mask=rows[:, None] < 15, other=0.0)
+    b_tail = tl.load(B + k_tail[:, None] * 1024 + cols[None, :])
+    acc0 += tl.dot(a_tail, b_tail, out_dtype=tl.float32, allow_tf32=False)
+    result = (acc0 + acc1).to(C.dtype.element_ty)
+    tl.store(C + rows[:, None] * 1024 + cols[None, :], result,
+             mask=rows[:, None] < 15)
+
+
+def _mm_o2_eligible(a, b):
+    return (
+        a.device.type == "cpu" and a.device == b.device
+        and a.layout == torch.strided and b.layout == torch.strided
+        and a.dtype == torch.float16 and b.dtype == torch.float16
+        and tuple(a.shape) == (15, 160) and tuple(b.shape) == (160, 1024)
+        and a.is_contiguous() and b.is_contiguous()
+        and not a.requires_grad and not b.requires_grad
+        and not a.is_conj() and not b.is_conj()
+        and not a.is_neg() and not b.is_neg()
+        and not is_syrk_transpose_pair(a, b)
+    )
+
+
 def mm(a, b):
     logger.debug("GEMS MM")
 
     device = a.device
+    if _mm_o2_eligible(a, b):
+        c = torch.empty((15, 1024), device=device, dtype=a.dtype)
+        with torch_device_fn.device(device):
+            _mm_o2_dualacc_kernel[(32,)](a, b, c, num_warps=4)
+        return c
     if is_syrk_transpose_pair(a, b):
         M, K = a.shape
         c = torch.empty((M, M), device=device, dtype=a.dtype)

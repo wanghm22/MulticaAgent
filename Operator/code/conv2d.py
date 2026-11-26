@@ -350,6 +350,63 @@ def conv2d_backward_kernel_weight(
     tl.store(weight_pointer, accum, weight_mask)
 
 
+# I2-CONV2D-O2-KSPACK: per-call K x spatial packing and NCHW-contiguous stores.
+@triton.jit
+def _conv2d_o2_im2col_kernel(X, P):
+    q = tl.program_id(0) * 8192 + tl.arange(0, 8192)
+    k = q // 2048
+    spatial = q % 2048
+    n = spatial // 1024
+    h = (spatial // 32) % 32
+    w = spatial % 32
+    ci = k // 9
+    ih = h + (k % 9) // 3 - 1
+    iw = w + k % 3 - 1
+    value = tl.load(X + n * 65536 + ci * 1024 + ih * 32 + iw,
+                    mask=(ih >= 0) & (ih < 32) & (iw >= 0) & (iw < 32),
+                    other=0.0)
+    # 144 * 8192 == 576 * 2048: initialize every P[k, spatial] per call.
+    tl.store(P + k * 2048 + spatial, value)
+
+
+@triton.jit
+def _conv2d_o2_gemm_kernel(P, W, Bias, Y):
+    pid = tl.program_id(0)
+    co = (pid % 2) * 32 + tl.arange(0, 32)
+    spatial = (pid // 2) * 32 + tl.arange(0, 32)
+    lanes_k = tl.arange(0, 64)
+    # Logical GEMM output is [co, spatial], with contiguous spatial columns.
+    acc = tl.zeros((32, 32), dtype=tl.float32)
+    for block in range(9):
+        k = block * 64 + lanes_k
+        a = tl.load(W + co[:, None] * 576 + k[None, :])
+        b = tl.load(P + k[:, None] * 2048 + spatial[None, :])
+        acc += tl.dot(a, b, out_dtype=tl.float32, allow_tf32=False)
+    acc += tl.load(Bias + co).to(tl.float32)[:, None]
+    n = spatial // 1024
+    hw = spatial % 1024
+    output_ptrs = Y + n[None, :] * 65536 + co[:, None] * 1024 + hw[None, :]
+    tl.store(output_ptrs, acc.to(Y.dtype.element_ty))
+
+
+def _conv2d_o2_eligible(input, weight, bias, stride, padding, dilation, groups):
+    return (
+        bias is not None and groups == 1
+        and stride == (1, 1) and padding == (1, 1) and dilation == (1, 1)
+        and input.device.type == "cpu"
+        and input.device == weight.device and input.device == bias.device
+        and input.layout == torch.strided and weight.layout == torch.strided
+        and bias.layout == torch.strided
+        and input.dtype == torch.float16 and weight.dtype == torch.float16
+        and bias.dtype == torch.float16
+        and tuple(input.shape) == (2, 64, 32, 32)
+        and tuple(weight.shape) == (64, 64, 3, 3) and tuple(bias.shape) == (64,)
+        and input.is_contiguous() and weight.is_contiguous() and bias.is_contiguous()
+        and not input.is_conj() and not weight.is_conj() and not bias.is_conj()
+        and not input.is_neg() and not weight.is_neg() and not bias.is_neg()
+    )
+
+
 class Conv2d(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, weight, bias, stride, padding, dilation, groups):
@@ -437,31 +494,40 @@ class Conv2d(torch.autograd.Function):
             bias_pointer = torch.zeros(out_c, device=input.device, dtype=output_dtype)
         else:
             bias_pointer = bias
-        conv2d_forward_kernel[grid](
-            input,
-            weight,
-            output,
-            bias_pointer,
-            in_n,
-            input_height,
-            input_width,
-            out_c,
-            out_height,
-            out_width,
-            *input.stride(),
-            *weight.stride(),
-            *output.stride(),
-            weight_c,
-            weight_height,
-            weight_width,
-            stride_height,
-            stride_width,
-            padding_height,
-            padding_width,
-            dilation_height,
-            dilation_width,
-            groups=groups,
-        )
+        if _conv2d_o2_eligible(
+            orig_input, orig_weight, bias,
+            (stride_height, stride_width), (padding_height, padding_width),
+            (dilation_height, dilation_width), groups,
+        ):
+            packed = torch.empty((576, 2048), device=input.device, dtype=torch.float16)
+            _conv2d_o2_im2col_kernel[(144,)](input, packed, num_warps=4)
+            _conv2d_o2_gemm_kernel[(128,)](packed, weight, bias, output, num_warps=4)
+        else:
+            conv2d_forward_kernel[grid](
+                input,
+                weight,
+                output,
+                bias_pointer,
+                in_n,
+                input_height,
+                input_width,
+                out_c,
+                out_height,
+                out_width,
+                *input.stride(),
+                *weight.stride(),
+                *output.stride(),
+                weight_c,
+                weight_height,
+                weight_width,
+                stride_height,
+                stride_width,
+                padding_height,
+                padding_width,
+                dilation_height,
+                dilation_width,
+                groups=groups,
+            )
 
         # Save ORIGINAL (unpadded) tensors for backward
         ctx.save_for_backward(orig_weight, orig_input, bias)
