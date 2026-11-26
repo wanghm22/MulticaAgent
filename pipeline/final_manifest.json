@@ -1,0 +1,62 @@
+{
+  "iteration": 3,
+  "measurement_source_commit": "481e7c1cbda80fa594289696837797a4b12cb3ba",
+  "operators": {
+    "abs": {
+      "candidate_id": "pasi265_i2_o0_abs_contigown",
+      "parent_candidate_id": "pasi265_i1_o2_abs_persist8",
+      "source": "Operator/code/abs.py",
+      "sha256": "0513c39e3cd9e981d3093048b02ca6cc6206380f228a0b788e1d90a98fed0db8",
+      "correctness": "passed",
+      "code_origin_orchestrator": 0
+    },
+    "aminmax": {
+      "candidate_id": "pasi265_i3_o2_aminmax_fold128",
+      "parent_candidate_id": "pasi265_i2_o0_aminmax_nomask",
+      "source": "Operator/code/aminmax.py",
+      "sha256": "56cda4cd6d119ea39eca1a9342d421823e7260aa64a0b5b45f0279edb7d3d202",
+      "correctness": "passed",
+      "code_origin_orchestrator": 2
+    },
+    "conv2d": {
+      "candidate_id": "pasi265_i3_o1_conv2d_bk64",
+      "parent_candidate_id": "pasi265_i2_o2_conv2d_kspack",
+      "source": "Operator/code/conv2d.py",
+      "sha256": "c4882dc9498aee3fedb8c718f9b7a87d277028a5f1e13adbc41b403eafc6d9ff",
+      "correctness": "passed",
+      "code_origin_orchestrator": 1
+    },
+    "mm": {
+      "candidate_id": "pasi265_i3_o2_mm_bk32",
+      "parent_candidate_id": "pasi265_i2_o0_mm_bn32",
+      "source": "Operator/code/mm.py",
+      "sha256": "1eca569399e63ef58e580e9bd47c3c5db4f03fc092ce5251ec340f94dd9bfe77",
+      "correctness": "passed",
+      "code_origin_orchestrator": 2
+    },
+    "mv": {
+      "candidate_id": "pasi265_i2_o2_mv_unroll2",
+      "parent_candidate_id": "pasi265_i1_o2_mv_dualacc",
+      "source": "Operator/code/mv.py",
+      "sha256": "efb0688fca756c051f3f34b98d34f78f857a8488213c7be6029dd6480aad36e3",
+      "correctness": "passed",
+      "code_origin_orchestrator": 2
+    },
+    "softmax": {
+      "candidate_id": "pasi265_i3_o1_softmax_rows32",
+      "parent_candidate_id": "pasi265_i1_o2_softmax_recip",
+      "source": "Operator/code/softmax.py",
+      "sha256": "7943785ce2d3c225513ccf96659eef581c7233267289ec4807860d3111dcc640",
+      "correctness": "passed",
+      "code_origin_orchestrator": 1
+    },
+    "topk": {
+      "candidate_id": "pasi265_i2_o1_topk_cpuheap10",
+      "parent_candidate_id": "pasi265_i0_topk_baseline",
+      "source": "Operator/code/topk.py",
+      "sha256": "c7f3267f7c25d26bcc3ef5983fb76c3ae5ce9cb558ee958f80af9fb829866097",
+      "correctness": "passed",
+      "code_origin_orchestrator": 1
+    }
+  }
+}

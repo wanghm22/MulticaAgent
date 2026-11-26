@@ -67,11 +67,50 @@ def mv_kernel(
     tl.store(C_ptrs, acc[:, None], mask=n_mask)
 
 
+# I1-MV-O2-DUALACC: exact-shape K3 CPU specialization.
+@triton.jit
+def _mv_o2_dualacc_kernel(A, B, C):
+    rows = tl.program_id(0) * 8 + tl.arange(0, 8)
+    cols = tl.arange(0, 256)
+    acc0 = tl.zeros((8, 256), dtype=tl.float32)
+    acc1 = tl.zeros((8, 256), dtype=tl.float32)
+    for j in tl.static_range(0, 2):
+        k0 = j * 512 + cols
+        k1 = k0 + 256
+        # Each vector segment is read once and shared across eight rows.
+        a0 = tl.load(A + rows[:, None] * 1024 + k0[None, :]).to(tl.float32)
+        b0 = tl.load(B + k0).to(tl.float32)
+        a1 = tl.load(A + rows[:, None] * 1024 + k1[None, :]).to(tl.float32)
+        b1 = tl.load(B + k1).to(tl.float32)
+        acc0 += a0 * b0[None, :]
+        acc1 += a1 * b1[None, :]
+    result = tl.sum(acc0 + acc1, axis=1)
+    tl.store(C + rows, result.to(C.dtype.element_ty))
+
+
+def _mv_o2_eligible(inp, vec):
+    return (
+        inp.device.type == "cpu"
+        and inp.device == vec.device
+        and inp.layout == torch.strided and vec.layout == torch.strided
+        and inp.dtype == torch.float16 and vec.dtype == torch.float16
+        and tuple(inp.shape) == (160, 1024) and tuple(vec.shape) == (1024,)
+        and inp.is_contiguous() and vec.is_contiguous()
+        and not inp.requires_grad and not vec.requires_grad
+        and not inp.is_conj() and not vec.is_conj()
+        and not inp.is_neg() and not vec.is_neg()
+    )
+
+
 def mv(inp, vec):
     logger.debug("GEMS MV")
     assert inp.shape[1] == vec.shape[0], "incompatible dimensions"
     N, M = inp.shape
     out = torch.empty((N,), device=inp.device, dtype=inp.dtype)
+    if _mv_o2_eligible(inp, vec):
+        with torch_device_fn.device(inp.device):
+            _mv_o2_dualacc_kernel[(20,)](inp, vec, out, num_warps=4)
+        return out
     grid = lambda META: (triton.cdiv(N, META["BLOCK_N"]),)
     with torch_device_fn.device(inp.device):
         mv_kernel[grid](

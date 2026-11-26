@@ -1,0 +1,226 @@
+{
+  "abs": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i1_o2_abs_persist8",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "8cc4ced8e3291e4615b0cd1056749e41df91a3e0d30d4bfdfba34fbdf0aaaf22",
+      "mean_ms": 1.60969421,
+      "speedup_vs_base": 2.766668338205677,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.03."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o0_abs_contigown",
+      "selected_from": "orchestrator_0",
+      "code_origin_orchestrator": 0,
+      "sha256": "0513c39e3cd9e981d3093048b02ca6cc6206380f228a0b788e1d90a98fed0db8",
+      "mean_ms": 1.3218261,
+      "speedup_vs_base": 1.2102297546301035,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i2_o0_abs_contigown",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": 0,
+      "sha256": "0513c39e3cd9e981d3093048b02ca6cc6206380f228a0b788e1d90a98fed0db8",
+      "mean_ms": 1.2751401183333333,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible improvement; retain validated baseline. Candidate differences overlap measurement noise; winner is the smallest observed mean, not proven uniquely fastest; tied alternatives: pasi265_i3_o0_abs_block8192, pasi265_i3_o2_abs_unroll4."
+    }
+  ],
+  "aminmax": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i0_aminmax_baseline",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": null,
+      "sha256": "a9009c4ba4c172cfa6335071931e786daa9e07cfda92a9d07eb846ebf6fd0b90",
+      "mean_ms": 4.85863054,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible >3% improvement; retain validated baseline."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o0_aminmax_nomask",
+      "selected_from": "orchestrator_0",
+      "code_origin_orchestrator": 0,
+      "sha256": "06eca5b698ddc7028bc332ad4c60838ed14da64b95c85bf2de2f0e7e442d0858",
+      "mean_ms": 3.27036881,
+      "speedup_vs_base": 1.4831529322223447,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i3_o2_aminmax_fold128",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "56cda4cd6d119ea39eca1a9342d421823e7260aa64a0b5b45f0279edb7d3d202",
+      "mean_ms": 2.33629399,
+      "speedup_vs_base": 1.4239253382661827,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    }
+  ],
+  "conv2d": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i1_o2_conv2d_im2col",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "04ace410165c5e916866b6a3160157ba03520bb8dca0146521eb5a225f5c4233",
+      "mean_ms": 12.03677119,
+      "speedup_vs_base": 2.1244896373244093,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.03."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o2_conv2d_kspack",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "3b143239a0802a178963bfde6081cb77228d122b0a61669e1a18b19623574160",
+      "mean_ms": 11.63964633,
+      "speedup_vs_base": 1.0246877157478032,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0. Candidate differences overlap measurement noise; winner is the smallest observed mean, not proven uniquely fastest; tied alternatives: pasi265_i2_o1_conv2d_co64."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i3_o1_conv2d_bk64",
+      "selected_from": "orchestrator_1",
+      "code_origin_orchestrator": 1,
+      "sha256": "c4882dc9498aee3fedb8c718f9b7a87d277028a5f1e13adbc41b403eafc6d9ff",
+      "mean_ms": 9.67461782,
+      "speedup_vs_base": 1.2086313255524548,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    }
+  ],
+  "mm": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i1_o2_mm_dualacc",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "0b515944e462ebacdf3bde9ff5d88beefc4ded8499fe1f55387b69d405db889a",
+      "mean_ms": 0.47218161000000003,
+      "speedup_vs_base": 2.450051654913032,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.03."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o0_mm_bn32",
+      "selected_from": "orchestrator_0",
+      "code_origin_orchestrator": 0,
+      "sha256": "f83ea75cc5fd45b5c567c3b12d60d051f2ce83b035a8b2c277e7cc232048dff7",
+      "mean_ms": 0.3158087742857143,
+      "speedup_vs_base": 1.5049965887584902,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i3_o2_mm_bk32",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "1eca569399e63ef58e580e9bd47c3c5db4f03fc092ce5251ec340f94dd9bfe77",
+      "mean_ms": 0.24169833875,
+      "speedup_vs_base": 1.3185568147255902,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    }
+  ],
+  "mv": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i1_o2_mv_dualacc",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "b7121f2cde0b7253876ba855eb82ff55ed92fcb282e2b5e2d53adcf7d8811e1f",
+      "mean_ms": 0.37589280833333333,
+      "speedup_vs_base": 1.5123632985174829,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.03."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o2_mv_unroll2",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "efb0688fca756c051f3f34b98d34f78f857a8488213c7be6029dd6480aad36e3",
+      "mean_ms": 0.27480075625,
+      "speedup_vs_base": 1.3704592743456105,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i2_o2_mv_unroll2",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": 2,
+      "sha256": "efb0688fca756c051f3f34b98d34f78f857a8488213c7be6029dd6480aad36e3",
+      "mean_ms": 0.27299418,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible improvement; retain validated baseline. Candidate differences overlap measurement noise; winner is the smallest observed mean, not proven uniquely fastest; tied alternatives: pasi265_i3_o0_mv_consume."
+    }
+  ],
+  "softmax": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i1_o2_softmax_recip",
+      "selected_from": "orchestrator_2",
+      "code_origin_orchestrator": 2,
+      "sha256": "7fb6b4507b437a9914576a2da02a31b23cceabb2acff328a6acb78308ccac9fb",
+      "mean_ms": 0.85130227,
+      "speedup_vs_base": 1.4510260145318303,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.03."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i1_o2_softmax_recip",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": 2,
+      "sha256": "7fb6b4507b437a9914576a2da02a31b23cceabb2acff328a6acb78308ccac9fb",
+      "mean_ms": 0.8421841466666666,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible improvement; retain validated baseline. Candidate differences overlap measurement noise; winner is the smallest observed mean, not proven uniquely fastest; tied alternatives: pasi265_i2_o1_softmax_halfreduce."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i3_o1_softmax_rows32",
+      "selected_from": "orchestrator_1",
+      "code_origin_orchestrator": 1,
+      "sha256": "7943785ce2d3c225513ccf96659eef581c7233267289ec4807860d3111dcc640",
+      "mean_ms": 0.8160279633333333,
+      "speedup_vs_base": 1.0288993282824146,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    }
+  ],
+  "topk": [
+    {
+      "iteration": 1,
+      "candidate_id": "pasi265_i0_topk_baseline",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": null,
+      "sha256": "7d78a0c7cc3d99660775f9f49721fdc39363e59e8e29a28dfcc6d951f187250f",
+      "mean_ms": 13.63970703,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible >3% improvement; retain validated baseline."
+    },
+    {
+      "iteration": 2,
+      "candidate_id": "pasi265_i2_o1_topk_cpuheap10",
+      "selected_from": "orchestrator_1",
+      "code_origin_orchestrator": 1,
+      "sha256": "c7f3267f7c25d26bcc3ef5983fb76c3ae5ce9cb558ee958f80af9fb829866097",
+      "mean_ms": 4.25131436,
+      "speedup_vs_base": 3.193281634905963,
+      "selection_reason": "Fastest correct eligible mean; paired block 95% speedup CI lower bound exceeds 1.0."
+    },
+    {
+      "iteration": 3,
+      "candidate_id": "pasi265_i2_o1_topk_cpuheap10",
+      "selected_from": "baseline",
+      "code_origin_orchestrator": 1,
+      "sha256": "c7f3267f7c25d26bcc3ef5983fb76c3ae5ce9cb558ee958f80af9fb829866097",
+      "mean_ms": 4.243692,
+      "speedup_vs_base": 1.0,
+      "selection_reason": "No candidate provides a statistically credible improvement; retain validated baseline."
+    }
+  ]
+}

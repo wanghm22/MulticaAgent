@@ -263,6 +263,73 @@ def softmax_kernel_inner_two_pass(
             )
 
 
+# I1-SOFTMAX-O2-RECIP: only selected for the exact original CPU layout.
+@libentry()
+@triton.jit
+def softmax_kernel_inner_two_pass_recip(
+    output_ptr,
+    input_ptr,
+    M,
+    N,
+    TILE_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    EVEN: tl.constexpr,
+):
+    pid = ext.program_id(0)
+    n_offsets = tl.arange(0, BLOCK_N)
+    nmask = n_offsets < N
+    for i in range(TILE_M // 2):
+        r0 = pid * TILE_M + 2 * i
+        r1 = r0 + 1
+        offs0 = r0 * N + n_offsets
+        offs1 = r1 * N + n_offsets
+        if EVEN:
+            # Two independent load chains issued back to back.
+            inp0 = tl.load(input_ptr + offs0).to(tl.float32)
+            inp1 = tl.load(input_ptr + offs1).to(tl.float32)
+            # Interleaved reduction chains: row0 and row1 max in flight.
+            m0 = tl.max(inp0, 0)
+            m1 = tl.max(inp1, 0)
+            m0 = tl.where(m0 == float("-inf"), 0.0, m0)
+            m1 = tl.where(m1 == float("-inf"), 0.0, m1)
+            e0 = tl.exp(inp0 - m0)
+            e1 = tl.exp(inp1 - m1)
+            z0 = tl.sum(e0, 0)
+            z1 = tl.sum(e1, 0)
+            # Exact FP32 per-row division, then broadcast multiply.
+            inv_z0 = tl.div_rn(1.0, z0)
+            inv_z1 = tl.div_rn(1.0, z1)
+            o0 = e0 * inv_z0
+            o1 = e1 * inv_z1
+            tl.store(output_ptr + offs0, o0.to(output_ptr.dtype.element_ty))
+            tl.store(output_ptr + offs1, o1.to(output_ptr.dtype.element_ty))
+        else:
+            mask0 = nmask & (r0 < M)
+            mask1 = nmask & (r1 < M)
+            inp0 = tl.load(input_ptr + offs0, mask=mask0, other=-float("inf")).to(
+                tl.float32
+            )
+            inp1 = tl.load(input_ptr + offs1, mask=mask1, other=-float("inf")).to(
+                tl.float32
+            )
+            m0 = tl.max(inp0, 0)
+            m1 = tl.max(inp1, 0)
+            m0 = tl.where(m0 == float("-inf"), 0.0, m0)
+            m1 = tl.where(m1 == float("-inf"), 0.0, m1)
+            e0 = tl.exp(inp0 - m0)
+            e1 = tl.exp(inp1 - m1)
+            z0 = tl.sum(e0, 0)
+            z1 = tl.sum(e1, 0)
+            o0 = e0 / z0
+            o1 = e1 / z1
+            tl.store(
+                output_ptr + offs0, o0.to(output_ptr.dtype.element_ty), mask=mask0
+            )
+            tl.store(
+                output_ptr + offs1, o1.to(output_ptr.dtype.element_ty), mask=mask1
+            )
+
+
 # Fallback for shapes the pair kernel must not take (N > 4096, or M so large
 # that ceil(M / TILE_M) would exceed the 256-program launch cap): per-row
 # STREAMING two-pass over TILE_N chunks (pass 1: online max/sum state, pass
@@ -453,6 +520,19 @@ def softmax_out(self, dim, half_to_float=False, *, out):
         zero_(out)
         return out
 
+    # Retain original-layout eligibility before the baseline contiguous copy.
+    use_recip = (
+        self.device.type == "cpu"
+        and self.layout == torch.strided
+        and self.dtype == torch.float16
+        and tuple(self.shape) == (1024, 1024)
+        and self.is_contiguous()
+        and not self.is_conj()
+        and not self.is_neg()
+        and not self.requires_grad
+        and dim in (1, -1)
+        and half_to_float is False
+    )
     dim = dim % self.ndim
     M = 1
     N = self.shape[dim]
@@ -465,6 +545,37 @@ def softmax_out(self, dim, half_to_float=False, *, out):
     if out.dtype != dtype:
         raise RuntimeError(f"_softmax.out: expected out dtype {dtype}, got {out.dtype}")
     K = self.numel() // M // N
+
+    # On contiguous tensors byte intervals give an exact overlap check,
+    # including differently offset views into the same backing allocation.
+    if (
+        use_recip
+        and out.device == self.device
+        and out.layout == torch.strided
+        and out.is_contiguous()
+        and not out.is_conj()
+        and not out.is_neg()
+        and not out.requires_grad
+    ):
+        input_start = self.data_ptr()
+        output_start = out.data_ptr()
+        byte_count = self.numel() * self.element_size()
+        if (
+            output_start + byte_count <= input_start
+            or input_start + byte_count <= output_start
+        ):
+            with torch_device_fn.device(self.device):
+                softmax_kernel_inner_two_pass_recip[(32, 1, 1)](
+                    out,
+                    self,
+                    1024,
+                    1024,
+                    TILE_M=32,
+                    BLOCK_N=1024,
+                    EVEN=True,
+                    num_warps=4,
+                )
+            return out
 
     with torch_device_fn.device(self.device):
         if K > 1:
